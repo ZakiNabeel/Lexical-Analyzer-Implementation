@@ -1,0 +1,17 @@
+ManualScanner results:
+- test1.lang: PASS
+- test2.lang: PASS
+- test3.lang: PASS
+- test4.lang: PASS (errors reported as expected)
+- test5.lang: PASS
+
+JFlex results:
+- test1.lang: PASS
+- test2.lang: PASS
+- test3.lang: PASS
+- test4.lang: PASS (errors reported as expected)
+- test5.lang: PASS
+
+Notes:
+- Differences:
+- Fixes made:

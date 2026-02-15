@@ -1,0 +1,8 @@
+start
+output "Quote: \" and backslash: \\"
+output "Tab:\tEnd"
+output "Carriage:\rEnd"
+output '\"'
+output '\\'
+output '\t'
+finish

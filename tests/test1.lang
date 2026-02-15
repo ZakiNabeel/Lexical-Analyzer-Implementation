@@ -1,0 +1,13 @@
+start
+declare X
+declare Total_sum_2024
+output "Hello\nWorld"
+output 'A'
+output '\n'
+condition true
+loop
+X = 42
+X += 5
+X = 3.14
+X = 2.0E-3
+finish

@@ -1,0 +1,9 @@
+start
+declare count
+declare 2Count
+output "Unclosed string
+output 'TooLong'
+output 1.2345678
+@bad
+#* unclosed comment
+finish
