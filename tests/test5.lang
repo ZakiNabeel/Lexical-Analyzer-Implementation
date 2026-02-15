@@ -1,0 +1,8 @@
+start
+## this is a single line comment
+declare X  ## comment after code
+#* this is
+a multi line
+comment *#
+output "Done"
+finish

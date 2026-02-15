@@ -1,0 +1,14 @@
+This assignment covers lexical rules for the language.
+
+Tokens:
+- Keywords
+- Identifiers
+- Integer literals
+- Floating-point literals
+- String literals
+- Character literals
+- Boolean literals
+- Operators
+- Punctuators
+- Comments
+- Whitespace (ignored, line tracked)

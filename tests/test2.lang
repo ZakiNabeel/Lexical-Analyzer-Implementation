@@ -1,0 +1,10 @@
+start
+declare X
+declare Y
+X = 10
+Y = 3
+output X**Y
+output (X + Y) * (X - Y) / Y % 2
+condition X >= 10 && Y != 0
+output "OK"
+finish
