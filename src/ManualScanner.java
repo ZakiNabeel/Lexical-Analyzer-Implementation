@@ -1,529 +1,303 @@
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Paths;
 import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 
 public class ManualScanner {
 
-    // 3.1 Keywords (case-sensitive)
+    // --- DFA STATES ---
+    private static final int S_START = 0;
+    private static final int S_ID = 1;
+    private static final int S_LOWER_WORD = 2; // Keywords/Booleans start with lowercase
+    private static final int S_INT = 3;
+    private static final int S_FLOAT = 4;
+    private static final int S_FLOAT_EXP_START = 5;
+    private static final int S_FLOAT_EXP_SIGN = 6;
+    private static final int S_FLOAT_EXP_DIGIT = 7;
+    private static final int S_OP = 8;              
+    private static final int S_OP_MULTI = 9;        
+    private static final int S_PUNCT = 10;
+    private static final int S_STRING_START = 11;   
+    private static final int S_STRING_CONTENT = 12; 
+    private static final int S_STRING_ESC = 13;     
+    private static final int S_STRING_END = 14;     
+    private static final int S_CHAR_START = 15;     
+    private static final int S_CHAR_CONTENT = 16;
+    private static final int S_CHAR_ESC = 17;
+    private static final int S_CHAR_END = 18;
+    
+    private static final int S_ERROR = -1;
+
+    // --- KEYWORDS & BOOLEANS ---
     private static final Set<String> KEYWORDS = new HashSet<>(Arrays.asList(
             "start", "finish", "loop", "condition", "declare", "output", "input",
             "function", "return", "break", "continue", "else"
     ));
-
-    // 3.7 Boolean literals (case-sensitive)
     private static final Set<String> BOOLEANS = new HashSet<>(Arrays.asList("true", "false"));
 
-    // Multi-char operators (must be checked before single-char ops)
-    private static final String[] MULTI_OPS = {
-            "**", "==", "!=", "<=", ">=", "&&", "||",
-            "++", "--",
-            "+=", "-=", "*=", "/="
-    };
-
-    private static final Set<Character> SINGLE_OPS = new HashSet<>(Arrays.asList(
-            '+', '-', '*', '/', '%', '<', '>', '!', '='
-    ));
-
-    private static final Set<Character> PUNCTUATORS = new HashSet<>(Arrays.asList(
-            '(', ')', '{', '}', '[', ']', ',', ';', ':'
-    ));
-
+    // --- FIELDS ---
     private final ErrorHandler errorHandler = new ErrorHandler();
     private final SymbolTable symbolTable = new SymbolTable();
     private final Map<TokenType, Integer> counts = new EnumMap<>(TokenType.class);
-
     private int commentsRemoved = 0;
 
-    private static class Cursor {
-        int i = 0;
-        int line = 1;
-        int col = 1;
-    }
-
-    private static class Match {
-        final TokenType type;
-        final int len;
-        final int priority;
-        Match(TokenType type, int len, int priority) {
-            this.type = type;
-            this.len = len;
-            this.priority = priority;
-        }
-    }
-
-    private static class Priority {
-        // smaller number means higher priority
-        static final int MULTI_OP = 1;
-        static final int KEYWORD = 2;
-        static final int BOOLEAN = 3;
-        static final int IDENTIFIER = 4;
-        static final int FLOAT = 5;
-        static final int INT = 6;
-        static final int STRING = 7;
-        static final int CHAR = 7;
-        static final int SINGLE_OP = 8;
-        static final int PUNCT = 9;
-    }
-
+    // --- MAIN SCAN METHOD ---
     public List<Token> scan(String src) {
         List<Token> tokens = new ArrayList<>();
-        Cursor c = new Cursor();
+        int pos = 0;
+        int line = 1;
+        int col = 1;
+        int len = src.length();
 
-        while (c.i < src.length()) {
+        while (pos < len) {
+            char c = src.charAt(pos);
 
-            // Skip whitespace, but track line and col
-            if (isWhitespace(src.charAt(c.i))) {
-                consumeWhitespace(src, c);
+            // 1. Skip Whitespace
+            if (isWhitespace(c)) {
+                if (c == '\n') { line++; col = 1; }
+                else { col++; }
+                pos++;
                 continue;
             }
 
-            // Multi-line comment: #* ... *#
-            if (startsWith(src, c.i, "#*")) {
-                int startLine = c.line, startCol = c.col;
-                int end = src.indexOf("*#", c.i + 2);
-                if (end == -1) {
-                    String lex = src.substring(c.i);
-                    errorHandler.report("UNCLOSED_MULTILINE_COMMENT", startLine, startCol, lex,
-                            "No closing *# found.");
-                    advanceByString(lex, c);
-                    break;
-                } else {
-                    String lex = src.substring(c.i, end + 2);
-                    advanceByString(lex, c);
-                    commentsRemoved++;
-                    continue;
-                }
+            // 2. BONUS: Nested Multi-line Comments (#*)
+            if (pos + 1 < len && src.substring(pos, pos + 2).equals("#*")) {
+                int[] res = scanMultiLineComment(src, pos, line, col);
+                pos = res[0];
+                line = res[1];
+                col = res[2];
+                commentsRemoved++; 
+                continue;
             }
 
-            // Single-line comment: ## ... endline
-            if (startsWith(src, c.i, "##")) {
-                int start = c.i;
-                int nl = findLineEnd(src, c.i);
-                String lex = src.substring(start, nl);
-                advanceByString(lex, c);
+            // 3. FIX: Single-line Comments (##)
+            // Explicitly handled here to ensure they are skipped before the DFA sees them
+            if (pos + 1 < len && src.substring(pos, pos + 2).equals("##")) {
+                int[] res = scanSingleLineComment(src, pos, line, col);
+                pos = res[0];
+                line = res[1];
+                col = res[2];
                 commentsRemoved++;
                 continue;
             }
 
-            int tokenLine = c.line;
-            int tokenCol = c.col;
+            // 4. DFA DRIVER
+            int startPos = pos;
+            int startLine = line;
+            int startCol = col;
+            
+            int currentState = S_START;
+            int lastAcceptingState = -1;
+            int lastAcceptingPos = -1;
+            int currentPos = pos;
+            
+            // We track furthest state to give better error messages
+            int furthestState = S_START;
 
-            // Special handling: if starts with quote, try parse string/char first so we can report precise errors
-            if (src.charAt(c.i) == '"') {
-                ParseResult pr = parseString(src, c.i);
-                if (!pr.ok) {
-                    errorHandler.report("MALFORMED_LITERAL", tokenLine, tokenCol, pr.lexeme, pr.reason);
-                    advanceByString(pr.lexeme, c);
-                    continue;
+            while (currentPos < len) {
+                char inputChar = src.charAt(currentPos);
+                int next = nextState(currentState, inputChar);
+                
+                if (next == S_ERROR) break; 
+                
+                currentState = next;
+                furthestState = currentState;
+                
+                if (isAccepting(currentState)) {
+                    lastAcceptingState = currentState;
+                    lastAcceptingPos = currentPos;
                 }
-            }
-            if (src.charAt(c.i) == '\'' || src.charAt(c.i) == '’') {
-                ParseResult pr = parseChar(src, c.i);
-                if (!pr.ok) {
-                    errorHandler.report("MALFORMED_LITERAL", tokenLine, tokenCol, pr.lexeme, pr.reason);
-                    advanceByString(pr.lexeme, c);
-                    continue;
-                }
+                
+                currentPos++;
             }
 
-            Match best = null;
-
-            // Priority order selection (longest match, then priority)
-            best = pickBest(best, matchMultiOp(src, c.i), Priority.MULTI_OP);
-            best = pickBest(best, matchKeyword(src, c.i), Priority.KEYWORD);
-            best = pickBest(best, matchBoolean(src, c.i), Priority.BOOLEAN);
-            best = pickBest(best, matchIdentifier(src, c.i), Priority.IDENTIFIER);
-            best = pickBest(best, matchFloat(src, c.i), Priority.FLOAT);
-            best = pickBest(best, matchInt(src, c.i), Priority.INT);
-            best = pickBest(best, matchString(src, c.i), Priority.STRING);
-            best = pickBest(best, matchChar(src, c.i), Priority.CHAR);
-            best = pickBest(best, matchSingleOp(src, c.i), Priority.SINGLE_OP);
-            best = pickBest(best, matchPunctuator(src, c.i), Priority.PUNCT);
-
-            if (best == null || best.len <= 0) {
-                // Recovery: invalid character or invalid identifier-like chunk
-                char bad = src.charAt(c.i);
-
-                if (Character.isLetterOrDigit(bad) || bad == '_' || bad == ' ') {
-                    int j = c.i;
-                    while (j < src.length()) {
-                        char ch = src.charAt(j);
-                        if (isWhitespace(ch) || isDelimiter(ch)) break;
-                        j++;
+            // 5. Token Generation
+            if (lastAcceptingState != -1) {
+                int tokenLen = (lastAcceptingPos - startPos) + 1;
+                String lexeme = src.substring(startPos, startPos + tokenLen);
+                
+                TokenType type = mapStateToType(lastAcceptingState);
+                
+                // Refine Identifiers (Keywords/Booleans/Validation)
+                if (type == TokenType.IDENTIFIER) {
+                    if (KEYWORDS.contains(lexeme)) {
+                        type = TokenType.KEYWORD;
+                    } else if (BOOLEANS.contains(lexeme)) {
+                        type = TokenType.BOOLEAN_LITERAL;
+                    } else {
+                        // Check Identifier Rules (Must start with Uppercase)
+                        if (!Character.isUpperCase(lexeme.charAt(0))) {
+                             errorHandler.report("INVALID_IDENTIFIER", startLine, startCol, lexeme, "Must start with Uppercase");
+                        } else {
+                             symbolTable.recordIdentifier(lexeme, startLine, startCol);
+                        }
                     }
-                    String lex = src.substring(c.i, j);
-                    errorHandler.report("INVALID_TOKEN", tokenLine, tokenCol, lex,
-                            "Unrecognised token starting here.");
-                    advanceByString(lex, c);
-                } else {
-                    errorHandler.report("INVALID_CHARACTER", tokenLine, tokenCol, String.valueOf(bad),
-                            "Character does not belong to any token.");
-                    advanceByString(String.valueOf(bad), c);
                 }
-                continue;
+
+                Token token = new Token(type, lexeme, startLine, startCol);
+                tokens.add(token);
+                counts.put(type, counts.getOrDefault(type, 0) + 1);
+
+                // Update Position
+                for (int k = 0; k < tokenLen; k++) {
+                    if (src.charAt(startPos + k) == '\n') { line++; col = 1; }
+                    else col++;
+                }
+                pos = startPos + tokenLen;
+
+            } else {
+                // ERROR RECOVERY - Improved
+                String badChar = String.valueOf(src.charAt(pos));
+                
+                // Check if we failed inside a string or char to give a better error
+                if (furthestState == S_STRING_CONTENT || furthestState == S_STRING_ESC || furthestState == S_STRING_START) {
+                    errorHandler.report("MALFORMED_LITERAL", startLine, startCol, "\"", "Unclosed string literal");
+                } else if (furthestState == S_CHAR_CONTENT || furthestState == S_CHAR_ESC || furthestState == S_CHAR_START) {
+                    errorHandler.report("MALFORMED_LITERAL", startLine, startCol, "'", "Unclosed character literal");
+                } else {
+                    errorHandler.report("INVALID_CHARACTER", line, col, badChar, "No token starts with this character");
+                }
+                
+                pos++;
+                col++;
             }
-
-            String lexeme = src.substring(c.i, c.i + best.len);
-
-            // Identifier max length 31 check (strict)
-            if (best.type == TokenType.IDENTIFIER && lexeme.length() > 31) {
-                errorHandler.report("INVALID_IDENTIFIER", tokenLine, tokenCol, lexeme,
-                        "Identifier exceeds max length 31.");
-                advanceByString(lexeme, c);
-                continue;
-            }
-
-            Token tok = new Token(best.type, lexeme, tokenLine, tokenCol);
-            tokens.add(tok);
-            counts.merge(tok.type, 1, Integer::sum);
-
-            if (tok.type == TokenType.IDENTIFIER) {
-                symbolTable.recordIdentifier(tok.lexeme, tok.line, tok.col);
-            }
-
-            advanceByString(lexeme, c);
         }
 
-        Token eof = new Token(TokenType.EOF, "EOF", 1, 1);
+        Token eof = new Token(TokenType.EOF, "EOF", line, col);
         tokens.add(eof);
-        counts.merge(TokenType.EOF, 1, Integer::sum);
-
+        counts.put(TokenType.EOF, counts.getOrDefault(TokenType.EOF, 0) + 1);
+        
         return tokens;
     }
 
-    // ---------- Matching ----------
+    // --- TRANSITION FUNCTION ---
+    private int nextState(int state, char c) {
+        switch (state) {
+            case S_START:
+                if (Character.isDigit(c)) return S_INT;
+                if (Character.isUpperCase(c)) return S_ID; 
+                if (Character.isLowerCase(c)) return S_LOWER_WORD; 
+                if (c == '"') return S_STRING_START;
+                if (c == '\'') return S_CHAR_START;
+                
+                // Note: # is handled in the main loop (comments)
+                
+                if ("*=!<>+ -".indexOf(c) != -1) return S_OP_MULTI;
+                if (c == '&' || c == '|') return S_OP_MULTI; 
+                if ("(){}[],;:".indexOf(c) != -1) return S_PUNCT;
+                if ("/%".indexOf(c) != -1) return S_OP;
+                return S_ERROR;
 
-    private static Match pickBest(Match current, Match candidate, int candidatePriority) {
-        if (candidate == null || candidate.len <= 0) return current;
-        Match c = new Match(candidate.type, candidate.len, candidatePriority);
+            case S_ID: 
+                if (Character.isLetterOrDigit(c) || c == '_') return S_ID;
+                return S_ERROR;
+            case S_LOWER_WORD: 
+                if (Character.isLetterOrDigit(c) || c == '_') return S_LOWER_WORD;
+                return S_ERROR;
 
-        if (current == null) return c;
+            case S_INT:
+                if (Character.isDigit(c)) return S_INT;
+                if (c == '.') return S_FLOAT;
+                return S_ERROR;
+            case S_FLOAT:
+                if (Character.isDigit(c)) return S_FLOAT;
+                if (c == 'e' || c == 'E') return S_FLOAT_EXP_START;
+                return S_ERROR;
+            case S_FLOAT_EXP_START:
+                if (c == '+' || c == '-') return S_FLOAT_EXP_SIGN;
+                if (Character.isDigit(c)) return S_FLOAT_EXP_DIGIT;
+                return S_ERROR;
+            case S_FLOAT_EXP_SIGN:
+            case S_FLOAT_EXP_DIGIT:
+                if (Character.isDigit(c)) return S_FLOAT_EXP_DIGIT;
+                return S_ERROR;
 
-        if (c.len > current.len) return c;
-        if (c.len == current.len && c.priority < current.priority) return c;
+            case S_STRING_START:
+            case S_STRING_CONTENT:
+                if (c == '"') return S_STRING_END;
+                if (c == '\\') return S_STRING_ESC;
+                return S_STRING_CONTENT; 
+            case S_STRING_ESC:
+                return S_STRING_CONTENT;
 
-        return current;
-    }
+            case S_CHAR_START:
+                if (c == '\\') return S_CHAR_ESC;
+                if (c == '\'') return S_ERROR; 
+                return S_CHAR_CONTENT;
+            case S_CHAR_CONTENT:
+                if (c == '\'') return S_CHAR_END;
+                return S_ERROR; 
+            case S_CHAR_ESC:
+                return S_CHAR_CONTENT;
 
-    private static Match matchMultiOp(String s, int i) {
-        for (String op : MULTI_OPS) {
-            if (startsWith(s, i, op)) return new Match(TokenType.OPERATOR, op.length(), Priority.MULTI_OP);
+            case S_OP_MULTI:
+                if (c == '=' || c == '+' || c == '-' || c == '*' || c == '&' || c == '|') return S_OP;
+                return S_ERROR;
+                
+            default:
+                return S_ERROR;
         }
-        return null;
     }
 
-    private static Match matchSingleOp(String s, int i) {
-        char ch = s.charAt(i);
-        if (SINGLE_OPS.contains(ch)) return new Match(TokenType.OPERATOR, 1, Priority.SINGLE_OP);
-        return null;
+    private boolean isAccepting(int state) {
+        return state == S_ID || state == S_LOWER_WORD || state == S_INT || 
+               state == S_FLOAT || state == S_FLOAT_EXP_DIGIT || 
+               state == S_OP || state == S_OP_MULTI || state == S_PUNCT || 
+               state == S_STRING_END || state == S_CHAR_END;
     }
 
-    private static Match matchPunctuator(String s, int i) {
-        char ch = s.charAt(i);
-        if (PUNCTUATORS.contains(ch)) return new Match(TokenType.PUNCTUATOR, 1, Priority.PUNCT);
-        return null;
+    private TokenType mapStateToType(int state) {
+        if (state == S_ID || state == S_LOWER_WORD) return TokenType.IDENTIFIER;
+        if (state == S_INT) return TokenType.INT_LITERAL;
+        if (state == S_FLOAT || state == S_FLOAT_EXP_DIGIT) return TokenType.FLOAT_LITERAL;
+        if (state == S_STRING_END) return TokenType.STRING_LITERAL;
+        if (state == S_CHAR_END) return TokenType.CHAR_LITERAL;
+        if (state == S_PUNCT) return TokenType.PUNCTUATOR;
+        return TokenType.OPERATOR;
     }
 
-    private static Match matchKeyword(String s, int i) {
-        for (String kw : KEYWORDS) {
-            if (startsWith(s, i, kw) && isWordBoundary(s, i, kw.length())) {
-                return new Match(TokenType.KEYWORD, kw.length(), Priority.KEYWORD);
+    // --- COMMENT HANDLERS ---
+    
+    // Single Line: ## ...
+    private int[] scanSingleLineComment(String src, int pos, int line, int col) {
+        pos += 2; col += 2; // skip ##
+        while (pos < src.length()) {
+            char c = src.charAt(pos);
+            if (c == '\n') {
+                return new int[]{pos, line, col};
             }
+            pos++; col++;
         }
-        return null;
+        return new int[]{pos, line, col};
     }
 
-    private static Match matchBoolean(String s, int i) {
-        for (String b : BOOLEANS) {
-            if (startsWith(s, i, b) && isWordBoundary(s, i, b.length())) {
-                return new Match(TokenType.BOOLEAN_LITERAL, b.length(), Priority.BOOLEAN);
-            }
-        }
-        return null;
-    }
-
-    private static Match matchIdentifier(String s, int i) {
-        char first = s.charAt(i);
-        if (!(first >= 'A' && first <= 'Z')) return null;
-
-        int j = i + 1;
-        int usedExtra = 0;
-
-        while (j < s.length() && usedExtra < 30) {
-            char ch = s.charAt(j);
-            // Spec conflict in PDF: it mentions underscore in rules, and regex line can look odd.
-            // We accept lowercase, digits, underscore, and space (space is uncommon but was shown in the given regex).
-            if (isLower(ch) || Character.isDigit(ch) || ch == '_') {
-                j++;
-                usedExtra++;
-            } else break;
-        }
-
-        // avoid consuming trailing spaces if present
-        while (j > i + 1 && s.charAt(j - 1) == ' ') j--;
-
-        return new Match(TokenType.IDENTIFIER, j - i, Priority.IDENTIFIER);
-    }
-
-    private static Match matchInt(String s, int i) {
-        int j = i;
-
-        if (s.charAt(j) == '+' || s.charAt(j) == '-') {
-            if (j + 1 >= s.length() || !Character.isDigit(s.charAt(j + 1))) return null;
-            j++;
-        }
-
-        int startDigits = j;
-        while (j < s.length() && Character.isDigit(s.charAt(j))) j++;
-
-        if (j == startDigits) return null;
-
-        // if next char is '.', it is probably a float, so do not match int here
-        if (j < s.length() && s.charAt(j) == '.') return null;
-
-        return new Match(TokenType.INT_LITERAL, j - i, Priority.INT);
-    }
-
-    private static Match matchFloat(String s, int i) {
-        int j = i;
-
-        if (s.charAt(j) == '+' || s.charAt(j) == '-') {
-            if (j + 1 >= s.length() || !Character.isDigit(s.charAt(j + 1))) return null;
-            j++;
-        }
-
-        int intStart = j;
-        while (j < s.length() && Character.isDigit(s.charAt(j))) j++;
-        if (j == intStart) return null;
-
-        if (j >= s.length() || s.charAt(j) != '.') return null;
-        j++;
-
-        int fracCount = 0;
-        while (j < s.length() && Character.isDigit(s.charAt(j)) && fracCount < 6) {
-            j++;
-            fracCount++;
-        }
-        if (fracCount < 1) return null;
-
-        // if more digits exist beyond 6 decimals, we treat float match as failed (so error handler can catch)
-        if (j < s.length() && Character.isDigit(s.charAt(j))) return null;
-
-        // optional exponent
-        if (j < s.length() && (s.charAt(j) == 'e' || s.charAt(j) == 'E')) {
-            int k = j + 1;
-            if (k < s.length() && (s.charAt(k) == '+' || s.charAt(k) == '-')) k++;
-            int expStart = k;
-            while (k < s.length() && Character.isDigit(s.charAt(k))) k++;
-            if (k == expStart) return null;
-            j = k;
-        }
-
-        return new Match(TokenType.FLOAT_LITERAL, j - i, Priority.FLOAT);
-    }
-
-    private static Match matchString(String s, int i) {
-        ParseResult pr = parseString(s, i);
-        if (!pr.ok) return null;
-        return new Match(TokenType.STRING_LITERAL, pr.len, Priority.STRING);
-    }
-
-    private static Match matchChar(String s, int i) {
-        ParseResult pr = parseChar(s, i);
-        if (!pr.ok) return null;
-        return new Match(TokenType.CHAR_LITERAL, pr.len, Priority.CHAR);
-    }
-
-    // ---------- String and char parsing with error recovery ----------
-
-    private static class ParseResult {
-        final boolean ok;
-        final int len;
-        final String lexeme;
-        final String reason;
-
-        ParseResult(boolean ok, int len, String lexeme, String reason) {
-            this.ok = ok;
-            this.len = len;
-            this.lexeme = lexeme;
-            this.reason = reason;
-        }
-    }
-
-    private static ParseResult parseString(String s, int i) {
-        if (s.charAt(i) != '"') return new ParseResult(false, 0, "", "Not a string.");
-
-        int j = i + 1;
-        while (j < s.length()) {
-            char ch = s.charAt(j);
-
-            if (ch == '\n' || ch == '\r') {
-                String lex = s.substring(i, j);
-                return new ParseResult(false, lex.length(), lex, "Unterminated string literal (newline encountered).");
-            }
-
-            if (ch == '"') {
-                String lex = s.substring(i, j + 1);
-                return new ParseResult(true, lex.length(), lex, "");
-            }
-
-            if (ch == '\\') {
-                if (j + 1 >= s.length()) {
-                    String lex = s.substring(i);
-                    return new ParseResult(false, lex.length(), lex, "Unterminated string literal (EOF after escape).");
-                }
-                char esc = s.charAt(j + 1);
-                if (!(esc == '"' || esc == '\\' || esc == 'n' || esc == 't' || esc == 'r')) {
-                    String lex = s.substring(i, Math.min(j + 2, s.length()));
-                    return new ParseResult(false, lex.length(), lex, "Invalid escape sequence: \\" + esc);
-                }
-                j += 2;
+    // Multi Line: #* ... *#
+    private int[] scanMultiLineComment(String src, int pos, int line, int col) {
+        int depth = 1;
+        pos += 2; col += 2; // skip #*
+        while (pos < src.length()) {
+            if (pos + 1 < src.length() && src.charAt(pos) == '#' && src.charAt(pos + 1) == '*') {
+                depth++;
+                pos += 2; col += 2;
                 continue;
             }
-
-            j++;
-        }
-
-        String lex = s.substring(i);
-        return new ParseResult(false, lex.length(), lex, "Unterminated string literal (EOF reached).");
-    }
-
-    private static ParseResult parseChar(String s, int i) {
-        char q = s.charAt(i);
-        if (!(q == '\'' || q == '’')) return new ParseResult(false, 0, "", "Not a char literal.");
-
-        int j = i + 1;
-        if (j >= s.length()) {
-            String lex = s.substring(i);
-            return new ParseResult(false, lex.length(), lex, "Unterminated char literal (EOF reached).");
-        }
-
-        char ch = s.charAt(j);
-        if (ch == '\n' || ch == '\r') {
-            String lex = s.substring(i, j);
-            return new ParseResult(false, lex.length(), lex, "Unterminated char literal (newline encountered).");
-        }
-
-        if (ch == '\\') {
-            if (j + 1 >= s.length()) {
-                String lex = s.substring(i);
-                return new ParseResult(false, lex.length(), lex, "Unterminated char literal (EOF after escape).");
+            if (pos + 1 < src.length() && src.charAt(pos) == '*' && src.charAt(pos + 1) == '#') {
+                depth--;
+                pos += 2; col += 2;
+                if (depth == 0) return new int[]{pos, line, col};
+                continue;
             }
-            char esc = s.charAt(j + 1);
-            if (!(esc == '\'' || esc == '’' || esc == '\\' || esc == 'n' || esc == 't' || esc == 'r')) {
-                String lex = s.substring(i, Math.min(j + 2, s.length()));
-                return new ParseResult(false, lex.length(), lex, "Invalid escape sequence in char: \\" + esc);
-            }
-            j += 2;
-        } else {
-            j += 1;
+            if (src.charAt(pos) == '\n') { line++; col = 1; }
+            else { col++; }
+            pos++;
         }
-
-        if (j < s.length() && (s.charAt(j) == '\'' || s.charAt(j) == '’')) {
-            String lex = s.substring(i, j + 1);
-            return new ParseResult(true, lex.length(), lex, "");
-        }
-
-        String lex = s.substring(i, Math.min(i + 4, s.length()));
-        return new ParseResult(false, lex.length(), lex, "Malformed char literal (missing closing quote or too long).");
+        errorHandler.report("UNCLOSED_COMMENT", line, col, "EOF", "Multi-line comment not closed");
+        return new int[]{pos, line, col};
     }
 
-    // ---------- Cursor utilities ----------
-
-    private static boolean startsWith(String s, int i, String prefix) {
-        return i + prefix.length() <= s.length() && s.startsWith(prefix, i);
-    }
-
-    private static boolean isWhitespace(char c) {
-        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-    }
-
-    private static void consumeWhitespace(String s, Cursor c) {
-        while (c.i < s.length() && isWhitespace(s.charAt(c.i))) {
-            char ch = s.charAt(c.i);
-            if (ch == '\r') {
-                if (c.i + 1 < s.length() && s.charAt(c.i + 1) == '\n') c.i++;
-                c.i++;
-                c.line++;
-                c.col = 1;
-            } else if (ch == '\n') {
-                c.i++;
-                c.line++;
-                c.col = 1;
-            } else {
-                c.i++;
-                c.col++;
-            }
-        }
-    }
-
-    private static int findLineEnd(String s, int i) {
-        int j = i;
-        while (j < s.length() && s.charAt(j) != '\n' && s.charAt(j) != '\r') j++;
-        return j;
-    }
-
-    private static void advanceByString(String lex, Cursor c) {
-        for (int k = 0; k < lex.length(); k++) {
-            char ch = lex.charAt(k);
-            if (ch == '\r') {
-                if (k + 1 < lex.length() && lex.charAt(k + 1) == '\n') k++;
-                c.i++;
-                c.line++;
-                c.col = 1;
-            } else if (ch == '\n') {
-                c.i++;
-                c.line++;
-                c.col = 1;
-            } else {
-                c.i++;
-                c.col++;
-            }
-        }
-    }
-
-    private static boolean isLower(char c) {
-        return c >= 'a' && c <= 'z';
-    }
-
-    private static boolean isDelimiter(char c) {
-        return SINGLE_OPS.contains(c) || PUNCTUATORS.contains(c) || c == '#';
-    }
-
-    private static boolean isWordBoundary(String s, int i, int len) {
-        int end = i + len;
-        if (end >= s.length()) return true;
-        char nxt = s.charAt(end);
-        // boundary means next char is not part of a word-like token
-        return !(Character.isLetterOrDigit(nxt) || nxt == '_');
-    }
-
-    // ---------- Main runner ----------
-
-    public static void main(String[] args) throws IOException {
-        if (args.length < 1) {
-            System.out.println("Usage: java ManualScanner <file.lang>");
-            return;
-        }
-
-        String src = new String(Files.readAllBytes(Paths.get(args[0])), StandardCharsets.UTF_8);
-
-        ManualScanner scanner = new ManualScanner();
-        List<Token> tokens = scanner.scan(src);
-
-        for (Token t : tokens) {
-            System.out.println(t);
-        }
-
-        scanner.printStats(tokens);
-        scanner.symbolTable.print();
-
-        if (scanner.errorHandler.hasErrors()) {
-            System.out.println("\n--- LEXICAL ERRORS ---");
-            scanner.errorHandler.printErrors();
-        }
+    private boolean isWhitespace(char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
     }
 
     private void printStats(List<Token> tokens) {
@@ -539,6 +313,26 @@ public class ManualScanner {
         for (TokenType tt : TokenType.values()) {
             int v = counts.getOrDefault(tt, 0);
             if (v > 0) System.out.println("  " + tt + ": " + v);
+        }
+    }
+    
+    public static void main(String[] args) throws IOException {
+        if (args.length < 1) {
+             System.out.println("Usage: java ManualScanner <file.lang>");
+             return;
+        }
+        String src = new String(Files.readAllBytes(Paths.get(args[0])), StandardCharsets.UTF_8);
+        ManualScanner scanner = new ManualScanner();
+        List<Token> tokens = scanner.scan(src);
+        
+        for (Token t : tokens) System.out.println(t);
+        
+        scanner.printStats(tokens);
+        scanner.symbolTable.print();
+
+        if (scanner.errorHandler.hasErrors()) {
+            System.out.println("\n--- LEXICAL ERRORS ---");
+            scanner.errorHandler.printErrors();
         }
     }
 }
