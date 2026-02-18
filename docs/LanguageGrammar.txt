@@ -1,14 +1,30 @@
-This assignment covers lexical rules for the language.
+Language Grammar & Lexical Specification
+Assignment 01 - CustomLang
 
-Tokens:
-- Keywords
-- Identifiers
-- Integer literals
-- Floating-point literals
-- String literals
-- Character literals
-- Boolean literals
-- Operators
-- Punctuators
-- Comments
-- Whitespace (ignored, line tracked)
+1. KEYWORDS (Case-Sensitive)
+   start, finish, loop, condition, declare, output, input, 
+   function, return, break, continue, else
+
+2. IDENTIFIERS
+   Regex: [A-Z][a-z0-9_]{0,30}
+   Rules: Must start with Uppercase. Max length 31.
+   Examples: Count, Total_Sum, X
+
+3. LITERALS
+   - Integer: [+-]?[0-9]+
+   - Float: [+-]?[0-9]+\.[0-9]{1,6}([eE][+-]?[0-9]+)?
+   - Boolean: true | false
+   - String: "..." (Supports \", \\, \n, \t, \r)
+   - Char: '...' (Single char or escape)
+
+4. OPERATORS & PUNCTUATORS
+   - Arithmetic: +, -, *, /, %, ** (Exponentiation)
+   - Relational: ==, !=, <=, >=, <, >
+   - Logical: &&, ||, !
+   - Assignment: =, +=, -=, *=, /=
+   - Increment/Decrement: ++, --
+   - Punctuators: ( ) { } [ ] , ; :
+
+5. COMMENTS
+   - Single-line: ## (until end of line)
+   - Multi-line: #* ... *#
